@@ -19,11 +19,13 @@ src_nrfd_nrfd_LDADD = libs/libhallog.a \
 				libs/libhalstorage.a \
 				libs/libnrf24l01.a \
 				libs/libspi.a \
-				@GLIB_LIBS@
+				@GLIB_LIBS@ \
+				@JSON_LIBS@
 src_nrfd_nrfd_LDFLAGS = $(AM_LDFLAGS)
 src_nrfd_nrfd_CFLAGS = $(AM_CFLAGS) @GLIB_CFLAGS@ \
 				-I$(top_srcdir)/src \
-				-I$(top_srcdir)/src/hal/comm
+				-I$(top_srcdir)/src/hal/comm \
+				@JSON_CFLAGS@
 
 src_phyemud_phyemud_SOURCES = src/phyemud/main.c \
 			src/hal/comm/comm_private.h \
