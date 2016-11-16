@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <stdbool.h>
 #include <string.h>
+#include <stdio.h>
 
 #ifdef ARDUINO
 #include <avr_errno.h>
@@ -327,6 +328,36 @@ int hal_comm_connect(int sockfd, uint64_t *addr)
 	/* Copy data to be write in tx buffer for BROADCAST*/
 	memcpy(mgmt.buffer_tx, datagram, len);
 	mgmt.len_tx = len;
+
+	return 0;
+}
+
+int nrf24_str2mac(const char *str, struct nrf24_mac *mac)
+{
+	/* Parse the input string into 8 bytes */
+	int rc = sscanf(str,
+		"%02hhx:%02hhx:%02hhx:%02hhx:%02hhx:%02hhx:%02hhx:%02hhx",
+		mac->address.b, mac->address.b + 1, mac->address.b + 2,
+		mac->address.b + 3, mac->address.b + 4, mac->address.b + 5,
+		mac->address.b + 6, mac->address.b + 7);
+	/* Invalid mac address format */
+	if (rc != 8)
+		return -1;
+
+	return 0;
+}
+
+int nrf24_mac2str(char *buffer, struct nrf24_mac mac)
+{
+	/* Write nrf24_mac.address into string buffer in hexadecimal format */
+	int rc = sprintf(buffer,
+		"%02hhx:%02hhx:%02hhx:%02hhx:%02hhx:%02hhx:%02hhx:%02hhx",
+			mac.address.b[0], mac.address.b[1], mac.address.b[2],
+			mac.address.b[3], mac.address.b[4], mac.address.b[5],
+			mac.address.b[6], mac.address.b[7]);
+	/* Invalid format */
+	if (rc != 8)
+		return -1;
 
 	return 0;
 }

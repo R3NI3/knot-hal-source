@@ -28,6 +28,12 @@ struct nrf24_mac {
 	} address;
 };
 
+/* Converts nrf24_mac address to string returning result in argument 1 */
+int nrf24_mac2str(char *, struct nrf24_mac);
+
+/* Converts string to nrf24_mac address. Address stored in argument 2 */
+int nrf24_str2mac(const char *, struct nrf24_mac *);
+
 /* Sent after detecting activity on data channel: pipe1 to pipe5*/
 struct mgmt_evt_nrf24_connected {
 	struct nrf24_mac src;	/* Source address */
