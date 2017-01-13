@@ -60,6 +60,7 @@ static int8_t check_permission(struct nrf24_mac mac)
 	uint8_t i;
 
 	for (i = 0; i < MAX_PEERS; i++) {
+		printf("PEERS %d: %llx\n", i, (long long) known_peers[i].address.uint64);
 		if (mac.address.uint64 == known_peers[i].address.uint64)
 			return 0;
 	}
@@ -158,9 +159,11 @@ static int8_t evt_presence(struct mgmt_nrf24_header *mhdr)
 	struct mgmt_evt_nrf24_bcast_presence *evt_pre =
 			(struct mgmt_evt_nrf24_bcast_presence *) mhdr->payload;
 
+	printf("PRESENCE: %llx\n",(long long) evt_pre->mac.address.uint64);
 	/* Check if peer is allowed to connect */
 	if (check_permission(evt_pre->mac) < 0)
 		return -EPERM;
+	printf("PASSOU: %llx\n",(long long) evt_pre->mac.address.uint64);
 
 	if (count_clients >= MAX_PEERS)
 		return -EUSERS; /*MAX PEERS*/
