@@ -158,7 +158,7 @@ static int8_t evt_presence(struct mgmt_nrf24_header *mhdr)
 	int err;
 	struct mgmt_evt_nrf24_bcast_presence *evt_pre =
 			(struct mgmt_evt_nrf24_bcast_presence *) mhdr->payload;
-
+	log_info("Chegou Presence");
 	/* Check if peer is allowed to connect */
 	if (check_permission(evt_pre->mac) < 0)
 		return -EPERM;
