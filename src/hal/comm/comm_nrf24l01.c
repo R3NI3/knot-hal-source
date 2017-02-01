@@ -20,6 +20,7 @@
 #include <unistd.h>
 #endif
 
+#include "include/config.h"
 #include "include/nrf24.h"
 #include "include/comm.h"
 #include "include/time.h"
@@ -39,6 +40,8 @@ static uint8_t listen = 0;
 static struct nrf24_mac addr_master = {.address.uint64 = 0};
 
 static struct nrf24_mac addr_slave = {.address.uint64 = 0 };
+
+static char name_slave[10];
 
 /* Structure to save broadcast context */
 struct nrf24_mgmt {
@@ -297,12 +300,14 @@ static int read_mgmt(int spi_fd)
 		evt->index = 0;
 		/* Copy source address */
 		evt_presence->mac.address.uint64 = presence->mac.address.uint64;
-		/*
-		 * evt_presence->name should be the name.
-		 * change de len_rx
-		 */
-		mgmt.len_rx = sizeof(struct nrf24_ll_presence) +
-				sizeof(struct mgmt_nrf24_header);
+
+		memcpy(evt_presence->name, presence->name,
+				ilen - sizeof(struct nrf24_ll_presence) -
+					sizeof(struct mgmt_nrf24_header) );
+
+		mgmt.len_rx = ilen - sizeof(struct nrf24_ll_mgmt_pdu) +
+					 sizeof(struct nrf24_ll_presence);
+
 	}
 		break;
 	/* If is a connect request type */
@@ -595,13 +600,15 @@ static void presence_connect(int spi_fd)
 		opdu->type = NRF24_PDU_TYPE_PRESENCE;
 		presence->mac.address.uint64 = addr_slave.address.uint64;
 
+		memcpy(presence->name, name_slave, strlen(name_slave));
 		/*
 		 * memcpy(presence->name, "someName", sizeof("someName");
 		 * and change the len parameter
 		 */
 
 		len = sizeof(struct nrf24_ll_mgmt_pdu) +
-					sizeof(struct nrf24_ll_presence);
+					sizeof(struct nrf24_ll_presence) +
+					strlen(name_slave);
 
 		phy_write(spi_fd, &p, len);
 		/* Init time */
@@ -943,6 +950,7 @@ int hal_comm_accept(int sockfd, uint64_t *addr)
 
 	/* Save slave address */
 	addr_slave.address.uint64 = *addr;
+	memcpy(name_slave, THING_NAME, sizeof(THING_NAME));
 
 	if (mgmt.len_rx == 0)
 		return -EAGAIN;

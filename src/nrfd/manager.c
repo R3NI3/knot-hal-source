@@ -42,6 +42,7 @@ struct peer {
 	int8_t knotd_fd;
 	GIOChannel *knotd_io;
 	guint knotd_id;
+	char name[10];
 };
 
 static struct peer peers[MAX_PEERS] = {
@@ -167,8 +168,8 @@ static int8_t evt_presence(struct mgmt_nrf24_header *mhdr)
 	 * things trying to connect to the gw.
 	 */
 	nrf24_mac2str(&evt_pre->mac, mac_str);
-	log_info("Thing sending presence. MAC = %s", mac_str);
-
+	log_info("Thing sending presence. MAC = %s Name = %s",
+				mac_str, evt_pre->name);
 	/* Check if peer is allowed to connect */
 	if (check_permission(evt_pre->mac) < 0)
 		return -EPERM;
@@ -202,6 +203,9 @@ static int8_t evt_presence(struct mgmt_nrf24_header *mhdr)
 		/* Set mac value for this position */
 		peers[position].mac =
 				evt_pre->mac.address.uint64;
+
+		memcpy(peers[position].name, evt_pre->name,
+					sizeof(peers[position].name));
 
 		/* Watch knotd socket */
 		peers[position].knotd_io =
