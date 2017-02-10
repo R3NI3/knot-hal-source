@@ -657,6 +657,9 @@ static int8_t evt_presence(struct mgmt_nrf24_header *mhdr)
 	position = get_peer(evt_pre->mac);
 	/* If this is a new peer */
 	if (position < 0) {
+		log_info("Connecting. MAC = %s Name =%s",
+			mac_str, evt_pre->name);
+
 		/* Get free peers position */
 		position = get_peer_index();
 		if (position < 0)
