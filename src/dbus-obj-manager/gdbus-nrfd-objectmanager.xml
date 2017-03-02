@@ -1,0 +1,25 @@
+<node>
+  <interface name="org.cesar.nrf.Adapter1">
+    <property name="Address" type="s" access="read"/>
+    <property name="Powered" type="b" access="readwrite"/>
+    <property name="Scan" type="b" access="readwrite"/>
+    <method name="AddDevice">
+      <arg type='a{sv}' name='properties' direction='in'/>
+    </method>
+    <method name="RemoveDevice">
+      <arg type='o' name='object' direction='in'/>
+    </method>
+  </interface>
+  <interface name="org.cesar.nrf.Device1">
+    <method name="Bind">
+      <arg type='s' name='publickey' direction='in'/>
+    </method>
+    <property name="Address" type="s" access="read"/>
+    <property name="Name" type="s" access="read"/>
+    <property name="Publickey" type="s" access="read"/>
+    <property name="Allowed" type="b" access="readwrite"/>
+    <property name="Connected" type="b" access="readwrite"/>
+    <property name="Broadcasting" type="b" access="readwrite"/>
+    <property name="Adapter" type="o" access="read"/>
+  </interface>
+</node>
