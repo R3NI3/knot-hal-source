@@ -85,6 +85,7 @@ static GHashTable *peer_bcast_table;
 static uint8_t count_clients;
 
 static GDBusNodeInfo *introspection_data = NULL;
+static GDBusObjectManagerServer *manager = NULL;
 
 /* Introspection data for the service we are exporting */
 static const gchar introspection_xml[] =
@@ -468,6 +469,8 @@ static void on_bus_acquired(GDBusConnection *connection, const gchar *name,
 		NULL
 	};
 
+	manager = g_dbus_object_manager_server_new("/org/cesar");
+
 	registration_id = g_dbus_connection_register_object(connection,
 					"/org/cesar/knot/nrf0",
 					introspection_data->interfaces[0],
@@ -528,6 +531,8 @@ static void on_bus_acquired(GDBusConnection *connection, const gchar *name,
 		}
 		adapter.known_peers[k].registration_id = registration_id;
 	}
+	/* Export all objects */
+	g_dbus_object_manager_server_set_connection(manager, connection);
 }
 
 static void on_name_acquired(GDBusConnection *connection, const gchar *name,
