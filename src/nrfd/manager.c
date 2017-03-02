@@ -26,6 +26,7 @@
 #include "include/nrf24.h"
 #include "include/comm.h"
 #include "include/time.h"
+#include "dbus-obj-manager/nrf-object-manager.h"
 
 #include "nrf24l01_io.h"
 #include "include/linux_log.h"
