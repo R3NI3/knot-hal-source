@@ -8,31 +8,21 @@ Adapter hierarchy
 Interface 	org.cesar.nrf.Adapter1
 Object path 	[variable prefix]/{nrf0, nrf1, ...}
 
-Methods 	void RemoveDevice(object device)
+Methods 	void AddDevice(dict properties)
+
+		Add a remote nRF device including its local stored
+		data such as keys and properties. Properties has string
+		PublicKey and string Name as optional and string Address,
+		boolean Allowed, boolean Connected, object Adapter as mandatory
+
+		Returns: org.cesar.nrf.Error.InvalidArguments
+
+		void RemoveDevice(object device)
 
 		Removes a remote nRF device including its local stored
 		data such as keys, and properties.
 
 		Returns: org.cesar.nrf.Error.InvalidArguments
-
-
-		void StartScanning(dict filter)
-
-		This method starts the device scanning session. Device
-		objects representing discovered devices are automatically
-		created. Caller must use StopScanning() to release the
-		session acquired.
-
-		Returns: org.cesar.nrf.Error.NotReady
-
-
-		void StopScanning(void)
-
-		This method releases the device scanning session.
-
-		Returns: org.cesar.nrf.Error.NotReady
-			org.cesar.nrf.Error.NotAutorized
-
 
 Properties 	string Address [readonly]
 
@@ -42,7 +32,12 @@ Properties 	string Address [readonly]
 
 		boolean Powered [readwrite]
 
-		Not persistent property. Switch Switch nRF adapter on/off
+		Not persistent property. Switch nRF adapter on/off
+
+		boolean Scan [readwrite]
+
+		Setting this property makes the adapter start scanning for new
+		devices.
 
 
 
@@ -52,11 +47,10 @@ Interface 	org.cesar.nrf.Device1
 Object path 	[variable prefix]/{nrf0, nrf1, ...}/dev_xx_xx_xx_xx_xx_xx_xx_xx
 
 
-Methods 	void Bind(dict properties)
+Methods 	void Bind(string PublicKey)
 
-		This method allows to create persistent association. Allowed
-		properties: "PublicKey", "PrivateKey". Keys are optional,
-		binding without keys results on open physical channel.
+		This method allows to create persistent association. Key is
+		optional, binding without key results on open physical channel.
 
 		Returns: org.cesar.nrf.Error.AlreadyExists
 			org.cesar.nrf.Error.InvalidArguments
@@ -70,22 +64,29 @@ Properties 	string Address [readonly]
 
 		string Name [readonly, optional]
 
-		nRF remote name. PropertiesChanged is be emitted if this
+		nRF remote name. PropertiesChanged is emitted if this
 		value changes.
 
+		string PublicKey [readonly, optional]
 
-		string PublicKey [writeonly]
+		Key is optional, the absence of a value for this property
+		results on open physical channel.
 
-		Remote's public key that can be set to enable a secure
-		channel between peers.
+		boolean Allowed [readwrite]
+
+		Indicates if the remote is allowed to connect.
+		PropertiesChanged is emitted if this value changes.
 
 
-		boolean Connected [readonly]
+		boolean Connected [readwrite]
 
 		Indicates if the remote is currently connected.
 		PropertiesChanged signal is emitted when this value
 		changes.
 
+		boolean Broadcasting [readwrite]
+
+		Indicates if the remote is broadcasting presence.
 
 		object Adapter [readonly]
 
