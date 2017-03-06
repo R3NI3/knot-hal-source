@@ -84,29 +84,8 @@ struct bcast_presence {
 static GHashTable *peer_bcast_table;
 static uint8_t count_clients;
 
-static GDBusNodeInfo *introspection_data = NULL;
 static GDBusObjectManagerServer *manager = NULL;
-
-/* Introspection data for the service we are exporting */
-static const gchar introspection_xml[] =
-	"<node>"
-	"  <interface name='org.cesar.knot.nrf0.Adapter'>"
-	"    <method name='AddDevice'>"
-	"      <arg type='s' name='mac' direction='in'/>"
-	"      <arg type='s' name='key' direction='in'/>"
-	"      <arg type='b' name='response' direction='out'/>"
-	"    </method>"
-	"    <method name='RemoveDevice'>"
-	"      <arg type='s' name='mac' direction='in'/>"
-	"      <arg type='b' name='response' direction='out'/>"
-	"    </method>"
-	"    <property type='s' name='Address' access='read'/>"
-	"    <property type='s' name='Powered' access='readwrite'/>"
-	"    <method name='GetBroadcastingDevices'>"
-	"      <arg type='s' name='response' direction='out'/>"
-	"    </method>"
-	"  </interface>"
-	"</node>";
+static GSList *proxy_list = NULL;
 
 static int write_file(const gchar *addr, const gchar *key, const gchar *name)
 {
@@ -166,373 +145,210 @@ failure:
 	return err;
 }
 
-static GVariant *handle_device_get_property(GDBusConnection *connection,
-				const gchar *sender,
-				const gchar *object_path,
-				const gchar *interface_name,
-				const gchar *property_name,
-				GError **error,
+static void on_properties_changed(GDBusProxy *proxy,
+				GVariant *changed_properties,
+				const gchar *const *invalidated_properties,
 				gpointer user_data)
 {
-	GVariant *gvar = NULL;
-	char str_mac[24];
-	gint dev;
-
-	dev = GPOINTER_TO_INT(user_data);
-	/* TODO implement Alias and Status */
-	if (g_strcmp0(property_name, "Mac") == 0) {
-		nrf24_mac2str(&adapter.known_peers[dev].addr, str_mac);
-		gvar = g_variant_new("s", str_mac);
-	} else if (g_strcmp0(property_name, "Alias") == 0) {
-		gvar = g_variant_new("s", adapter.known_peers[dev].alias);
-	} else if (g_strcmp0(property_name, "Status") == 0) {
-		gvar = g_variant_new_boolean(adapter.known_peers[dev].status);
-	} else {
-		gvar = g_variant_new_string("Unknown property requested");
-	}
-
-	return gvar;
+	write_file(NULL, "tmp", NULL);
+	/* TODO: implement action for some properties changed like powered */
 }
 
-static int8_t new_device_object(GDBusConnection *connection, uint32_t free_pos)
+static gboolean parse_input(Device1 *dev, GVariantDict *properties)
 {
-	uint8_t i;
-	guint registration_id;
-	GDBusInterfaceInfo *interface;
-	GDBusPropertyInfo **properties;
-	gchar object_path[26];
-	gchar *name[] = {"Mac", "Alias", "Status"};
-	gchar *signature[] = {"s", "s", "b"};
-	GDBusInterfaceVTable interface_device_vtable = {
-		NULL,
-		handle_device_get_property,
-		NULL
-	};
+	const gchar *in_str;
+	gboolean in_bool = FALSE;
+	/* Only Address is mandatory */
+	if (g_variant_dict_lookup(properties, "PublicKey", "&s", &in_str))
+		device1_set_publickey(dev, in_str);
 
-	properties = g_new0(GDBusPropertyInfo *, 4);
-	for (i = 0; i < 3; i++) {
-		properties[i] = g_new0(GDBusPropertyInfo, 1);
-		/*
-		 * properties->ref_count is incremented here because when
-		 * registering an object the function only increments
-		 * interface->ref_count. Not doing this leads to the memory
-		 * of properties not being deallocated when we call
-		 * g_dbus_connection_unregister_object.
-		 */
-		g_atomic_int_inc(&properties[i]->ref_count);
-		properties[i]->name = g_strdup(name[i]);
-		properties[i]->signature = g_strdup(signature[i]);
-		properties[i]->flags = G_DBUS_PROPERTY_INFO_FLAGS_READABLE;
-		properties[i]->annotations = NULL;
-	}
+	if (g_variant_dict_lookup(properties, "Name", "&s", &in_str))
+		device1_set_name(dev, in_str);
 
-	interface = g_new0(GDBusInterfaceInfo, 1);
-	interface->name = g_strdup("org.cesar.knot.nrf.Device");
-	interface->methods = NULL;
-	interface->signals = NULL;
-	interface->properties = properties;
-	interface->annotations = NULL;
-
-	snprintf(object_path, 26, "/org/cesar/knot/nrf0/mac%d", free_pos);
-
-	registration_id = g_dbus_connection_register_object(
-					connection,
-					object_path,
-					interface,
-					&interface_device_vtable,
-					GINT_TO_POINTER(free_pos),  /* user data */
-					NULL,  /* user data free func */
-					NULL); /* GError** */
-	/* Free mem if fail */
-	if (registration_id <= 0) {
-		for (i = 0; properties[i] != NULL; i++) {
-			g_free(properties[i]->name);
-			g_free(properties[i]->signature);
-			g_free(properties[i]);
-		}
-		g_free(properties);
-		g_free(interface->name);
-		g_free(interface);
-		return -1;
-	}
-	adapter.known_peers[free_pos].registration_id = registration_id;
-	return 0;
-}
-
-static gboolean add_known_device(GDBusConnection *connection, const gchar *mac,
-							const gchar *key)
-{
-	uint8_t alloc_pos, i;
-	int32_t free_pos;
-	gchar alias[7];
-	gboolean response = FALSE;
-	struct nrf24_mac new_dev;
-
-	if (nrf24_str2mac(mac, &new_dev) < 0)
-		goto done;
-
-	for (i = 0, alloc_pos = 0, free_pos = -1; alloc_pos <
-					adapter.known_peers_size; i++) {
-		if (adapter.known_peers[i].addr.address.uint64 ==
-						new_dev.address.uint64) {
-			if (write_file(mac, key, NULL) < 0)
-				hal_log_error("Error writing to file");
-			response = TRUE;
-			goto done;
-
-		} else if (adapter.known_peers[i].addr.address.uint64 != 0) {
-			alloc_pos++;
-		} else if (free_pos < 0) {
-			/* store available position */
-			free_pos = i;
-		}
-	}
-	/* If there is no empty space between allocated spaces */
-	if (free_pos < 0)
-		free_pos = i;
-
-	/* If struct has free space add device to struct */
-	if (adapter.known_peers_size < MAX_PEERS) {
-		if (new_device_object(connection, free_pos) < 0)
-			goto done;
-
-		adapter.known_peers[free_pos].addr.address.uint64 =
-							new_dev.address.uint64;
-		snprintf(alias, 7, "Thing%d", free_pos);
-		adapter.known_peers[free_pos].alias = g_strdup(alias);
-		adapter.known_peers[free_pos].status = FALSE;
-		/* TODO: Set key for this mac */
-		if (write_file(mac, key, alias) < 0)
-			hal_log_error("Error writing to file");
-		adapter.known_peers_size++;
-		response = TRUE;
-	}
-
-done:
-	return response;
-}
-
-static gboolean remove_known_device(GDBusConnection *connection,
-							const gchar *mac)
-{
-	uint8_t i;
-	gboolean response = FALSE;
-	struct nrf24_mac dev;
-
-	if (nrf24_str2mac(mac, &dev) < 0)
+	if (!g_variant_dict_lookup(properties, "Address", "&s", &in_str))
 		return FALSE;
+	device1_set_address(dev, in_str);
 
-	for (i = 0; i < MAX_PEERS; i++) {
-		if (adapter.known_peers[i].addr.address.uint64 ==
-							dev.address.uint64) {
-			if (!g_dbus_connection_unregister_object(connection,
-				adapter.known_peers[i].registration_id))
-				break;
-			/* Remove mac from struct */
-			adapter.known_peers[i].addr.address.uint64 = 0;
-			g_free(adapter.known_peers[i].alias);
-			adapter.known_peers_size--;
-			if (write_file(mac, NULL, NULL) < 0)
-				hal_log_error("Error writing to file");
-			response = TRUE;
-			break;
-		}
-	}
+	if (g_variant_dict_lookup(properties, "Allowed", "b", &in_bool))
+		device1_set_allowed(dev, in_bool);
+	else
+		device1_set_allowed(dev, FALSE);
 
-	return response;
-}
+	if (g_variant_dict_lookup(properties, "Connected", "b", &in_bool))
+		device1_set_broadcasting(dev, in_bool);
+	else
+		device1_set_broadcasting(dev, FALSE);
 
-static int peers_to_json(struct json_object *peers_bcast_json)
-{
-	GHashTableIter iter;
-	gpointer key, value;
-	struct json_object *jobj;
+	if (g_variant_dict_lookup(properties, "Broadcasting", "b", &in_bool))
+		device1_set_broadcasting(dev, in_bool);
+	else
+		device1_set_broadcasting(dev, FALSE);
 
-	g_hash_table_iter_init (&iter, peer_bcast_table);
-
-	while (g_hash_table_iter_next (&iter, &key, &value)) {
-		struct bcast_presence *peer = value;
-
-		jobj = json_object_new_object();
-		if (peer == NULL)
-			continue;
-
-		json_object_object_add(jobj, "name",
-					json_object_new_string(peer->name));
-		json_object_object_add(jobj, "mac",
-					json_object_new_string((char *) key));
-		json_object_object_add(jobj, "last_beacon",
-				json_object_new_int(peer->last_beacon));
-
-		json_object_array_add(peers_bcast_json, jobj);
-	}
-
-	return 0;
-}
-
-static void handle_method_call(GDBusConnection *connection,
-				const gchar *sender,
-				const gchar *object_path,
-				const gchar *interface_name,
-				const gchar *method_name,
-				GVariant *parameters,
-				GDBusMethodInvocation *invocation,
-				gpointer user_data)
-{
-	const gchar *mac;
-	const gchar *key;
-	gboolean response;
-	struct json_object *peers_bcast;
-
-	if (g_strcmp0(method_name, "AddDevice") == 0) {
-		g_variant_get(parameters, "(&s&s)", &mac, &key);
-		/* Add or Update mac address */
-		response = add_known_device(connection, mac, key);
-		g_dbus_method_invocation_return_value(invocation,
-				g_variant_new("(b)", response));
-	} else if (g_strcmp0(method_name, "RemoveDevice") == 0) {
-		g_variant_get(parameters, "(&s)", &mac);
-		/* Remove device */
-		response = remove_known_device(connection, mac);
-		g_dbus_method_invocation_return_value(invocation,
-				g_variant_new("(b)", response));
-	} else if (g_strcmp0("GetBroadcastingDevices", method_name) == 0) {
-		/* FIXME: Temporary solution it will be replaced by signals */
-		/* Get list of devices that sent presence recently */
-		peers_bcast = json_object_new_array();
-		peers_to_json(peers_bcast);
-		g_dbus_method_invocation_return_value(invocation,
-				g_variant_new("(s)",
-				json_object_to_json_string(peers_bcast)));
-		json_object_put(peers_bcast);
-	}
-}
-
-static GVariant *handle_get_property(GDBusConnection  *connection,
-				const gchar *sender,
-				const gchar *object_path,
-				const gchar *interface_name,
-				const gchar *property_name,
-				GError **gerr,
-				gpointer user_data)
-{
-	GVariant *gvar = NULL;
-	char str_mac[24];
-
-	if (g_strcmp0(property_name, "Address") == 0) {
-		nrf24_mac2str(&adapter.mac, str_mac);
-		gvar = g_variant_new("s", str_mac);
-	} else if (g_strcmp0(property_name, "Powered") == 0) {
-		gvar = g_variant_new_boolean(adapter.powered);
-	} else {
-		gvar = g_variant_new_string("Unknown property requested");
-	}
-
-	return gvar;
-}
-
-static gboolean handle_set_property(GDBusConnection  *connection,
-				const gchar *sender,
-				const gchar *object_path,
-				const gchar *interface_name,
-				const gchar *property_name,
-				GVariant *value,
-				GError **gerr,
-				gpointer user_data)
-{
-	if (g_strcmp0(property_name, "Powered") == 0) {
-		adapter.powered = g_variant_get_boolean(value);
-		/* TODO turn adapter on or off */
-	}
 	return TRUE;
 }
 
-static const GDBusInterfaceVTable interface_vtable = {
-	handle_method_call,
-	handle_get_property,
-	handle_set_property
-};
+static void add_known_device(Adapter1 *adpt, GDBusMethodInvocation *invocation,
+				GVariant *properties, gpointer user_data)
+{
+	GVariantDict *prop;
+	Device1 *new_dev;
+	ObjectSkeleton *obj_skl;
+	struct nrf24_mac dev_addr;
+	gchar *path;
+	const gchar *adpt_path;
+
+	g_object_ref(invocation);
+
+	adpt_path = g_dbus_method_invocation_get_object_path(invocation);
+	new_dev = device1_skeleton_new();
+	/* Parse the properties passed */
+	prop =  g_variant_dict_new(properties);
+	if (!parse_input(new_dev, prop)) {
+		g_dbus_method_invocation_return_dbus_error(invocation,
+					"org.cesar.nrf.Error.InvalidArguments",
+					"Missing Arguments");
+		g_variant_dict_unref(prop);
+		g_object_unref(new_dev);
+		return;
+	}
+	g_variant_dict_unref(prop);
+	device1_set_adapter(new_dev, adpt_path);
+
+	if (nrf24_str2mac(device1_get_address(new_dev), &dev_addr) < 0) {
+		g_dbus_method_invocation_return_dbus_error(invocation,
+					"org.cesar.nrf.Error.InvalidArguments",
+					"Invalid Address Format");
+		g_object_unref(new_dev);
+		return;
+	}
+
+	path = g_strdup_printf(
+		"%s/dev%02hhx_%02hhx_%02hhx_%02hhx_%02hhx_%02hhx_%02hhx_%02hhx",
+		adpt_path,
+		dev_addr.address.b[0], dev_addr.address.b[1],
+		dev_addr.address.b[2], dev_addr.address.b[3],
+		dev_addr.address.b[4], dev_addr.address.b[5],
+		dev_addr.address.b[6], dev_addr.address.b[7]);
+
+	obj_skl = object_skeleton_new(path);
+	object_skeleton_set_device1(obj_skl, new_dev);
+	g_object_unref(new_dev);
+
+	g_dbus_object_manager_server_export(manager,
+					G_DBUS_OBJECT_SKELETON(obj_skl));
+	g_object_unref(obj_skl);
+	g_free(path);
+
+	/* TODO: if PublicKey is set add it on known_peers list */
+	adapter1_complete_add_device(adpt, invocation);
+}
+
+static void remove_known_device(Adapter1 *adpt,
+					GDBusMethodInvocation *invocation,
+					gchar *object, gpointer user_data)
+{
+	g_object_ref(invocation);
+	/*TODO: remove device from the adapter known_devices struct */
+	g_dbus_object_manager_server_unexport(manager, object);
+	adapter1_complete_remove_device(adpt, invocation);
+
+}
 
 static void on_bus_acquired(GDBusConnection *connection, const gchar *name,
 							gpointer user_data)
 {
-	uint8_t i, j, k;
-	guint registration_id;
-	GDBusInterfaceInfo *interface;
-	GDBusPropertyInfo **properties;
-	gchar object_path[26];
-	gchar *obj_name[] = {"Mac", "Alias", "Status"};
-	gchar *signature[] = {"s", "s", "b"};
-	GDBusInterfaceVTable interface_device_vtable = {
-		NULL,
-		handle_device_get_property,
-		NULL
-	};
+	uint8_t j;
+	ObjectSkeleton *obj_skl;
+	char address[MAC_ADDRESS_SIZE];
+	Adapter1 *adpt;
+	Adapter1 *adpt_proxy;
+	Device1 *dev;
+	Device1 *dev_proxy;
+	gchar *adpt_path, *path;
 
 	manager = g_dbus_object_manager_server_new("/org/cesar");
+	g_dbus_object_manager_server_set_connection(manager, connection);
 
-	registration_id = g_dbus_connection_register_object(connection,
-					"/org/cesar/knot/nrf0",
-					introspection_data->interfaces[0],
-					&interface_vtable,
-					NULL,  /* user_data */
-					NULL,  /* user_data_free_func */
-					NULL); /* GError** */
-	g_assert(registration_id > 0);
+	adpt_path = g_strdup("/org/cesar/knot/nrf0");
+	obj_skl = object_skeleton_new(adpt_path);
+
+	adpt = adapter1_skeleton_new();
+	adapter1_set_powered(adpt, TRUE);
+	if (nrf24_mac2str(&adapter.mac, address) == 0)
+		adapter1_set_address(adpt, address);
+
+	adapter1_set_scan(adpt, FALSE);
+	object_skeleton_set_adapter1(obj_skl, adpt);
+	g_object_unref(adpt);
+
+	g_signal_connect(adpt, "handle-remove-device",
+					G_CALLBACK(remove_known_device), NULL);
+
+	g_signal_connect(adpt, "handle-add-device",
+					G_CALLBACK(add_known_device),
+					connection);
+
+	g_dbus_object_manager_server_export(manager,
+					G_DBUS_OBJECT_SKELETON(obj_skl));
+	g_object_unref(obj_skl);
+
+	adpt_proxy = adapter1_proxy_new_sync(connection,
+						G_DBUS_PROXY_FLAGS_NONE,
+						"org.cesar.knot.nrf",
+						adpt_path, NULL,
+						NULL);
+
+	g_signal_connect(adpt_proxy, "g-properties-changed",
+				G_CALLBACK(on_properties_changed), NULL);
+
+	proxy_list = g_slist_prepend(proxy_list, adpt_proxy);
 
 	/* Register on dbus every device already known */
-	for (j = 0, k = 0; j < adapter.known_peers_size; j++, k++) {
-		properties = g_new0(GDBusPropertyInfo *, 4);
-		for (i = 0; i < 3; i++) {
-			properties[i] = g_new0(GDBusPropertyInfo, 1);
-			/*
-			 * properties->ref_count is incremented here because
-			 * when registering an object the function only
-			 * increments interface->ref_count. Not doing this leads
-			 * to the memory of properties not being deallocated
-			 * when we call g_dbus_connection_unregister_object.
-			 */
-			g_atomic_int_inc(&properties[i]->ref_count);
-			properties[i]->name = g_strdup(obj_name[i]);
-			properties[i]->signature = g_strdup(signature[i]);
-			properties[i]->flags =
-					G_DBUS_PROPERTY_INFO_FLAGS_READABLE;
-			properties[i]->annotations = NULL;
-		}
+	for (j = 0; j < adapter.known_peers_size; j++) {
+		path = g_strdup_printf(
+		"%s/dev%02hhx_%02hhx_%02hhx_%02hhx_%02hhx_%02hhx_%02hhx_%02hhx",
+				adpt_path,
+				adapter.known_peers[j].addr.address.b[0],
+				adapter.known_peers[j].addr.address.b[1],
+				adapter.known_peers[j].addr.address.b[2],
+				adapter.known_peers[j].addr.address.b[3],
+				adapter.known_peers[j].addr.address.b[4],
+				adapter.known_peers[j].addr.address.b[5],
+				adapter.known_peers[j].addr.address.b[6],
+				adapter.known_peers[j].addr.address.b[7]);
 
-		interface = g_new0(GDBusInterfaceInfo, 1);
-		interface->name = g_strdup("org.cesar.knot.mac.Device");
-		interface->methods = NULL;
-		interface->signals = NULL;
-		interface->properties = properties;
-		interface->annotations = NULL;
+		obj_skl = object_skeleton_new(path);
 
-		snprintf(object_path, 26, "/org/cesar/knot/nrf0/mac%d", k);
+		dev = device1_skeleton_new();
+		if (nrf24_mac2str(&adapter.known_peers[j].addr, address) == 0)
+			device1_set_address(dev, address);
 
-		registration_id = g_dbus_connection_register_object(
-						connection,
-						object_path,
-						interface,
-						&interface_device_vtable,
-						GINT_TO_POINTER(k),
-						NULL,  /* user data free func */
-						NULL); /* GError** */
-		if (registration_id <= 0) {
-			for (i = 0; properties[i] != NULL; i++) {
-				g_free(properties[i]->name);
-				g_free(properties[i]->signature);
-				g_free(properties[i]);
-			}
-			g_free(properties);
-			g_free(interface->name);
-			g_free(interface);
-			k--;
-			continue;
-		}
-		adapter.known_peers[k].registration_id = registration_id;
+		device1_set_name(dev, adapter.known_peers[j].alias);
+		device1_set_allowed(dev, TRUE);
+		device1_set_connected(dev, TRUE);
+		device1_set_broadcasting(dev, FALSE);
+		device1_set_adapter(dev, adpt_path);
+		object_skeleton_set_device1(obj_skl, dev);
+		g_object_unref(dev);
+
+		g_dbus_object_manager_server_export(manager,
+					G_DBUS_OBJECT_SKELETON(obj_skl));
+		g_object_unref(obj_skl);
+
+		dev_proxy = device1_proxy_new_sync(connection,
+							G_DBUS_PROXY_FLAGS_NONE,
+							"org.cesar.knot.nrf",
+							path, NULL,
+							NULL);
+		g_free(path);
+
+		g_signal_connect(dev_proxy, "g-properties-changed",
+					G_CALLBACK(on_properties_changed),
+					NULL);
+
+		proxy_list = g_slist_prepend(proxy_list, dev_proxy);
 	}
-	/* Export all objects */
-	g_dbus_object_manager_server_set_connection(manager, connection);
+	g_free(adpt_path);
 }
 
 static void on_name_acquired(GDBusConnection *connection, const gchar *name,
@@ -554,17 +370,12 @@ static void on_name_lost(GDBusConnection *connection, const gchar *name,
 	}
 
 	g_free(adapter.file_name);
-	g_dbus_node_info_unref(introspection_data);
 	exit(EXIT_FAILURE);
 }
 
 static guint dbus_init(struct nrf24_mac mac)
 {
 	guint owner_id;
-
-	introspection_data = g_dbus_node_info_new_for_xml(introspection_xml,
-									NULL);
-	g_assert(introspection_data != NULL);
 
 	owner_id = g_bus_own_name(G_BUS_TYPE_SYSTEM,
 					"org.cesar.knot.nrf",
@@ -587,7 +398,7 @@ static void dbus_on_close(guint owner_id)
 	}
 	g_free(adapter.file_name);
 	g_bus_unown_name(owner_id);
-	g_dbus_node_info_unref(introspection_data);
+	g_slist_free_full(proxy_list, g_object_unref);
 }
 
 /* Check if peer is on list of known peers */
