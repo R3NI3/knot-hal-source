@@ -52,9 +52,7 @@ static struct adapter {
 	/* Struct with the known peers */
 	struct {
 		struct nrf24_mac addr;
-		guint registration_id;
 		gchar *alias;
-		gboolean status;
 	} known_peers[MAX_PEERS];
 	guint known_peers_size;
 } adapter;
@@ -185,39 +183,31 @@ static gboolean parse_input(Device1 *dev, GVariantDict *properties)
 	return TRUE;
 }
 
-static void add_known_device(Adapter1 *adpt, GDBusMethodInvocation *invocation,
-				GVariant *properties, gpointer user_data)
+static int32_t add_dev_interface(const gchar *adpt_path, GVariant *properties,
+							gpointer user_data)
 {
-	GVariantDict *prop;
 	Device1 *new_dev;
 	ObjectSkeleton *obj_skl;
+	GVariantDict *prop;
 	struct nrf24_mac dev_addr;
+	uint32_t i;
 	gchar *path;
-	const gchar *adpt_path;
+	gboolean is_exported;
 
-	g_object_ref(invocation);
-
-	adpt_path = g_dbus_method_invocation_get_object_path(invocation);
 	new_dev = device1_skeleton_new();
 	/* Parse the properties passed */
 	prop =  g_variant_dict_new(properties);
 	if (!parse_input(new_dev, prop)) {
-		g_dbus_method_invocation_return_dbus_error(invocation,
-					"org.cesar.nrf.Error.InvalidArguments",
-					"Missing Arguments");
 		g_variant_dict_unref(prop);
 		g_object_unref(new_dev);
-		return;
+		return -EINVAL;
 	}
 	g_variant_dict_unref(prop);
 	device1_set_adapter(new_dev, adpt_path);
 
 	if (nrf24_str2mac(device1_get_address(new_dev), &dev_addr) < 0) {
-		g_dbus_method_invocation_return_dbus_error(invocation,
-					"org.cesar.nrf.Error.InvalidArguments",
-					"Invalid Address Format");
 		g_object_unref(new_dev);
-		return;
+		return -EINVAL;
 	}
 
 	path = g_strdup_printf(
@@ -232,12 +222,59 @@ static void add_known_device(Adapter1 *adpt, GDBusMethodInvocation *invocation,
 	object_skeleton_set_device1(obj_skl, new_dev);
 	g_object_unref(new_dev);
 
-	g_dbus_object_manager_server_export(manager,
+	is_exported = g_dbus_object_manager_server_is_exported(manager,
 					G_DBUS_OBJECT_SKELETON(obj_skl));
+	if (!is_exported)
+		g_dbus_object_manager_server_export(manager,
+					G_DBUS_OBJECT_SKELETON(obj_skl));
+
 	g_object_unref(obj_skl);
 	g_free(path);
+	/* Does not set new device as persistent */
+	if (!user_data)
+		goto done;
 
-	/* TODO: if PublicKey is set add it on known_peers list */
+	/* Check if device is already on persistent storage */
+	for (i = 0; i < MAX_PEERS; i++) {
+		if (dev_addr.address.uint64 ==
+				adapter.known_peers[i].addr.address.uint64)
+			goto done;
+	}
+	/* Put device on persistent storage */
+	for (i = 0; i < MAX_PEERS; i++) {
+		if (adapter.known_peers[i].addr.address.uint64 == 0) {
+			adapter.known_peers[i].addr.address.uint64 =
+						dev_addr.address.uint64;
+			g_free(adapter.known_peers[i].alias);
+			adapter.known_peers[i].alias =
+					g_strdup(device1_get_name(new_dev));
+			adapter.known_peers_size++;
+			write_file(device1_get_address(new_dev),
+						"",
+						adapter.known_peers[i].alias);
+			break;
+		}
+	}
+
+done:
+	return 0;
+}
+
+static void add_known_device(Adapter1 *adpt, GDBusMethodInvocation *invocation,
+				GVariant *properties, gpointer user_data)
+{
+	const gchar *adpt_path;
+
+	g_object_ref(invocation);
+
+	adpt_path = g_dbus_method_invocation_get_object_path(invocation);
+	if (add_dev_interface(adpt_path, properties, user_data) < 0) {
+		g_dbus_method_invocation_return_dbus_error(invocation,
+					"org.cesar.nrf.Error.InvalidArguments",
+					"Invalid Address Format");
+		return;
+	}
+
 	adapter1_complete_add_device(adpt, invocation);
 }
 
@@ -245,7 +282,36 @@ static void remove_known_device(Adapter1 *adpt,
 					GDBusMethodInvocation *invocation,
 					gchar *object, gpointer user_data)
 {
+	uint32_t i;
+	struct nrf24_mac addr;
+	gchar mac_str[MAC_ADDRESS_SIZE];
+	gchar tmp[21];
+
+	memset(&addr, 0, sizeof(addr));
 	g_object_ref(invocation);
+
+	if (sscanf(object,
+		"%20s/dev%02hhx_%02hhx_%02hhx_%02hhx_%02hhx_%02hhx_%02hhx_%02hhx",
+		tmp, &addr.address.b[0], &addr.address.b[1], &addr.address.b[2],
+		&addr.address.b[3], &addr.address.b[4], &addr.address.b[5],
+		&addr.address.b[6], &addr.address.b[7]) != 9) {
+		g_dbus_method_invocation_return_dbus_error(invocation,
+					"org.cesar.nrf.Error.InvalidArguments",
+					"Invalid Object Format");
+		return;
+	}
+
+	for (i = 0; i < MAX_PEERS; i++) {
+		if (adapter.known_peers[i].addr.address.uint64 ==
+							addr.address.uint64) {
+			adapter.known_peers[i].addr.address.uint64 = 0;
+			adapter.known_peers_size--;
+			nrf24_mac2str(&addr, mac_str);
+			write_file(mac_str, NULL, NULL);
+			break;
+		}
+	}
+
 	/*TODO: remove device from the adapter known_devices struct */
 	g_dbus_object_manager_server_unexport(manager, object);
 	adapter1_complete_remove_device(adpt, invocation);
@@ -257,12 +323,12 @@ static void on_bus_acquired(GDBusConnection *connection, const gchar *name,
 {
 	uint8_t j;
 	ObjectSkeleton *obj_skl;
+	GVariantBuilder builder;
 	char address[MAC_ADDRESS_SIZE];
 	Adapter1 *adpt;
 	Adapter1 *adpt_proxy;
-	Device1 *dev;
-	Device1 *dev_proxy;
-	gchar *adpt_path, *path;
+	gchar *adpt_path;
+	GVariant *properties;
 
 	manager = g_dbus_object_manager_server_new("/org/cesar");
 	g_dbus_object_manager_server_set_connection(manager, connection);
@@ -277,7 +343,6 @@ static void on_bus_acquired(GDBusConnection *connection, const gchar *name,
 
 	adapter1_set_scan(adpt, FALSE);
 	object_skeleton_set_adapter1(obj_skl, adpt);
-	g_object_unref(adpt);
 
 	g_signal_connect(adpt, "handle-remove-device",
 					G_CALLBACK(remove_known_device), NULL);
@@ -303,49 +368,31 @@ static void on_bus_acquired(GDBusConnection *connection, const gchar *name,
 
 	/* Register on dbus every device already known */
 	for (j = 0; j < adapter.known_peers_size; j++) {
-		path = g_strdup_printf(
-		"%s/dev%02hhx_%02hhx_%02hhx_%02hhx_%02hhx_%02hhx_%02hhx_%02hhx",
-				adpt_path,
-				adapter.known_peers[j].addr.address.b[0],
-				adapter.known_peers[j].addr.address.b[1],
-				adapter.known_peers[j].addr.address.b[2],
-				adapter.known_peers[j].addr.address.b[3],
-				adapter.known_peers[j].addr.address.b[4],
-				adapter.known_peers[j].addr.address.b[5],
-				adapter.known_peers[j].addr.address.b[6],
-				adapter.known_peers[j].addr.address.b[7]);
+		if (nrf24_mac2str(&adapter.known_peers[j].addr, address) < 0) {
+			hal_log_error("Invalid stored mac address");
+			continue;
+		}
 
-		obj_skl = object_skeleton_new(path);
+		g_variant_builder_init(&builder, G_VARIANT_TYPE_ARRAY);
+		g_variant_builder_add(&builder, "{sv}", "Name",
+			g_variant_new_string(adapter.known_peers[j].alias));
+		g_variant_builder_add(&builder, "{sv}", "Address",
+						g_variant_new_string(address));
+		g_variant_builder_add(&builder, "{sv}", "Connected",
+						g_variant_new_boolean(FALSE));
+		g_variant_builder_add(&builder, "{sv}", "Allowed",
+						g_variant_new_boolean(TRUE));
+		g_variant_builder_add(&builder, "{sv}", "Broadcasting",
+						g_variant_new_boolean(FALSE));
 
-		dev = device1_skeleton_new();
-		if (nrf24_mac2str(&adapter.known_peers[j].addr, address) == 0)
-			device1_set_address(dev, address);
+		properties = g_variant_builder_end(&builder);
+		/* Create dbus objects for devices on persistent storage */
+		if (add_dev_interface(adpt_path, properties, NULL) < 0)
+			hal_log_error("Invalid values stored on keys.json\n");
 
-		device1_set_name(dev, adapter.known_peers[j].alias);
-		device1_set_allowed(dev, TRUE);
-		device1_set_connected(dev, TRUE);
-		device1_set_broadcasting(dev, FALSE);
-		device1_set_adapter(dev, adpt_path);
-		object_skeleton_set_device1(obj_skl, dev);
-		g_object_unref(dev);
-
-		g_dbus_object_manager_server_export(manager,
-					G_DBUS_OBJECT_SKELETON(obj_skl));
-		g_object_unref(obj_skl);
-
-		dev_proxy = device1_proxy_new_sync(connection,
-							G_DBUS_PROXY_FLAGS_NONE,
-							"org.cesar.knot.nrf",
-							path, NULL,
-							NULL);
-		g_free(path);
-
-		g_signal_connect(dev_proxy, "g-properties-changed",
-					G_CALLBACK(on_properties_changed),
-					NULL);
-
-		proxy_list = g_slist_prepend(proxy_list, dev_proxy);
+		g_variant_unref(properties);
 	}
+	g_object_unref(adpt);
 	g_free(adpt_path);
 }
 
@@ -499,12 +546,14 @@ static int8_t evt_presence(struct mgmt_nrf24_header *mhdr)
 {
 	GIOCondition cond = G_IO_IN | G_IO_ERR | G_IO_HUP | G_IO_NVAL;
 	int8_t position;
-	uint8_t i;
 	int err;
 	char mac_str[MAC_ADDRESS_SIZE];
 	struct bcast_presence *peer;
 	struct mgmt_evt_nrf24_bcast_presence *evt_pre =
 			(struct mgmt_evt_nrf24_bcast_presence *) mhdr->payload;
+	GVariantBuilder builder;
+	gchar *adpt_path;
+	GVariant *properties;
 
 	nrf24_mac2str(&evt_pre->mac, mac_str);
 	peer = g_hash_table_lookup(peer_bcast_table, mac_str);
@@ -531,6 +580,27 @@ static int8_t evt_presence(struct mgmt_nrf24_header *mhdr)
 	 * we will discard devices that broadcasted
 	 */
 	g_hash_table_insert(peer_bcast_table, g_strdup(mac_str), peer);
+
+	/* Set properties and insert new dbus object for this device */
+	g_variant_builder_init(&builder,  G_VARIANT_TYPE_ARRAY);
+	g_variant_builder_add(&builder, "{sv}", "Name",
+					g_variant_new_string((char *) evt_pre->name));
+	g_variant_builder_add(&builder, "{sv}", "Address",
+						g_variant_new_string(mac_str));
+	g_variant_builder_add(&builder, "{sv}", "Connected",
+						g_variant_new_boolean(FALSE));
+	g_variant_builder_add(&builder, "{sv}", "Allowed",
+						g_variant_new_boolean(FALSE));
+	g_variant_builder_add(&builder, "{sv}", "Broadcasting",
+						g_variant_new_boolean(TRUE));
+
+	adpt_path = g_strdup("/org/cesar/knot/nrf0");
+
+	properties = g_variant_builder_end(&builder);
+	add_dev_interface(adpt_path, properties, NULL);
+
+	g_variant_unref(properties);
+	g_free(adpt_path);
 done:
 	/* Check if peer is allowed to connect */
 	if (check_permission(evt_pre->mac) < 0)
@@ -590,13 +660,6 @@ done:
 
 		count_clients++;
 
-		for (i = 0; i < MAX_PEERS; i++) {
-			if (evt_pre->mac.address.uint64 ==
-				adapter.known_peers[i].addr.address.uint64) {
-				adapter.known_peers[i].status = TRUE;
-				break;
-			}
-		}
 		/* Remove device when the connection is established */
 		g_hash_table_remove(peer_bcast_table, mac_str);
 	}
@@ -1009,7 +1072,6 @@ static int parse_nodes(const char *nodes_file)
 		/* Set the name of the peer registered */
 		adapter.known_peers[i].alias =
 				g_strdup(json_object_get_string(obj_tmp));
-		adapter.known_peers[i].status = FALSE;
 	}
 
 	err = 0;
