@@ -148,8 +148,20 @@ static void on_properties_changed(GDBusProxy *proxy,
 				const gchar *const *invalidated_properties,
 				gpointer user_data)
 {
-	write_file(NULL, "tmp", NULL);
-	/* TODO: implement action for some properties changed like powered */
+	/* TODO: Implement Radio actions for some change on properties */
+	GVariantIter *iter;
+	GVariant *value;
+	const gchar *key;
+
+	if (g_variant_n_children(changed_properties) > 0) {
+		g_variant_get(changed_properties,
+				"a{sv}",
+				&iter);
+		while(g_variant_iter_loop(iter, "{&sv}", &key, &value)) {
+			/* Do something depending with the new properties */
+		}
+		g_variant_iter_free(iter);
+	}
 }
 
 static gboolean parse_input(Device1 *dev, GVariantDict *properties)
