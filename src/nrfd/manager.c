@@ -185,6 +185,58 @@ static gboolean parse_input(Device1 *dev, GVariantDict *properties)
 	return TRUE;
 }
 
+/* Check if peer is on list of known peers */
+static int8_t check_permission(struct nrf24_mac mac)
+{
+	uint32_t i;
+
+	for (i = 0; i < MAX_PEERS; i++) {
+		if (mac.address.uint64 ==
+				adapter.known_peers[i].addr.address.uint64)
+			return 0;
+	}
+
+	return -EPERM;
+}
+
+static void device_bind(Device1 *dev, GDBusMethodInvocation *invocation,
+				gchar *public_key, gpointer user_data)
+{
+	uint32_t i;
+	struct nrf24_mac dev_addr;
+
+	g_object_ref(invocation);
+	nrf24_str2mac(device1_get_address(dev), &dev_addr);
+
+	if (check_permission(dev_addr) == 0) {
+		device1_set_allowed(dev, TRUE);
+		g_dbus_method_invocation_return_dbus_error(invocation,
+					"org.cesar.nrf.Error.AlreadyExists",
+					"Object already in persistent storage");
+		return;
+	}
+
+	device1_set_publickey(dev, public_key);
+	device1_set_allowed(dev, TRUE);
+	/* Add device to persistent storage */
+	for (i = 0; i < MAX_PEERS; i++) {
+		if (adapter.known_peers[i].addr.address.uint64 == 0) {
+			adapter.known_peers[i].addr.address.uint64 =
+						dev_addr.address.uint64;
+			g_free(adapter.known_peers[i].alias);
+			adapter.known_peers[i].alias =
+						g_strdup(device1_get_name(dev));
+			adapter.known_peers_size++;
+			write_file(device1_get_address(dev),
+						public_key,
+						adapter.known_peers[i].alias);
+			break;
+		}
+	}
+
+	device1_complete_bind(dev, invocation);
+}
+
 static int32_t add_dev_interface(const gchar *adpt_path, GVariant *properties,
 							gpointer user_data)
 {
@@ -222,6 +274,8 @@ static int32_t add_dev_interface(const gchar *adpt_path, GVariant *properties,
 
 	obj_skl = object_skeleton_new(path);
 	object_skeleton_set_device1(obj_skl, new_dev);
+
+	g_signal_connect(new_dev, "handle-bind", G_CALLBACK(device_bind), NULL);
 	g_object_unref(new_dev);
 
 	is_exported = g_dbus_object_manager_server_is_exported(manager,
@@ -314,7 +368,7 @@ static void remove_known_device(Adapter1 *adpt,
 		}
 	}
 
-	/*TODO: remove device from the adapter known_devices struct */
+	/*TODO: Force device to disconnect */
 	g_dbus_object_manager_server_unexport(manager, object);
 	adapter1_complete_remove_device(adpt, invocation);
 
@@ -446,20 +500,6 @@ static void dbus_on_close(guint owner_id)
 	g_free(adapter.file_name);
 	g_bus_unown_name(owner_id);
 	g_slist_free_full(proxy_list, g_object_unref);
-}
-
-/* Check if peer is on list of known peers */
-static int8_t check_permission(struct nrf24_mac mac)
-{
-	uint8_t i;
-
-	for (i = 0; i < MAX_PEERS; i++) {
-		if (mac.address.uint64 ==
-				adapter.known_peers[i].addr.address.uint64)
-			return 0;
-	}
-
-	return -EPERM;
 }
 
 /* Get peer position in vector of peers*/
