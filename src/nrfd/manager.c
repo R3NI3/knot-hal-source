@@ -1234,11 +1234,27 @@ failure:
 static gboolean check_timeout(gpointer key, gpointer value, gpointer user_data)
 {
 	struct bcast_presence *peer = value;
-
+	gchar *adpt_path;
+	gchar *obj_path;
+	struct nrf24_mac dev_addr;
 	/* If it returns true the key/value is removed */
 	if (hal_timeout(hal_time_ms(), peer->last_beacon,
 							BCAST_TIMEOUT) > 0) {
 		hal_log_info("Peer %s timedout.", (char *) key);
+		nrf24_str2mac((char *) key, &dev_addr);
+		adpt_path = g_strdup("/org/cesar/knot/nrf0");
+		obj_path = g_strdup_printf(
+		"%s/dev%02hhx_%02hhx_%02hhx_%02hhx_%02hhx_%02hhx_%02hhx_%02hhx",
+				adpt_path,
+				dev_addr.address.b[0], dev_addr.address.b[1],
+				dev_addr.address.b[2], dev_addr.address.b[3],
+				dev_addr.address.b[4], dev_addr.address.b[5],
+				dev_addr.address.b[6], dev_addr.address.b[7]);
+		/* Remove dbus object */
+		g_dbus_object_manager_server_unexport(manager, obj_path);
+
+		g_free(adpt_path);
+		g_free(obj_path);
 		return TRUE;
 	}
 
