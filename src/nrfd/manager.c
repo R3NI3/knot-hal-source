@@ -249,6 +249,53 @@ static void device_bind(Device1 *dev, GDBusMethodInvocation *invocation,
 	device1_complete_bind(dev, invocation);
 }
 
+static void update_dev_properties(GDBusConnection *connection,
+							GVariant *properties,
+							gchar *obj_path)
+{
+	Device1 *dev_proxy;
+	gboolean in_bool;
+	GVariantDict *prop_dict;
+	GError *gerror = NULL;
+
+	/* Create proxy device */
+	dev_proxy = device1_proxy_new_sync(connection,
+				G_DBUS_PROXY_FLAGS_DO_NOT_LOAD_PROPERTIES,
+				"org.cesar.knot.nrf",
+				obj_path, NULL,
+				NULL);
+
+	/* Parse Properties */
+	prop_dict =  g_variant_dict_new(properties);
+	if (g_variant_dict_lookup(prop_dict, "Connected", "b", &in_bool))
+		g_dbus_proxy_call_sync(G_DBUS_PROXY(dev_proxy),
+					"org.freedesktop.DBus.Properties.Set",
+					g_variant_new("(ssv)",
+						"org.cesar.nrf.Device1",
+						"Connected",
+						g_variant_new_boolean(in_bool)),
+					G_DBUS_CALL_FLAGS_NONE, -1,
+					NULL, &gerror);
+
+	if (g_variant_dict_lookup(prop_dict, "Broadcasting", "b", &in_bool))
+		g_dbus_proxy_call_sync(G_DBUS_PROXY(dev_proxy),
+					"org.freedesktop.DBus.Properties.Set",
+					g_variant_new("(ssv)",
+						"org.cesar.nrf.Device1",
+						"Broadcasting",
+						g_variant_new_boolean(in_bool)),
+					G_DBUS_CALL_FLAGS_NONE, -1,
+					NULL, &gerror);
+
+	if (gerror)
+		hal_log_error("Error setting property of device\n");
+	/* free memmory */
+	g_object_unref(dev_proxy);
+	g_object_unref(connection);
+	g_variant_dict_unref(prop_dict);
+
+}
+
 static int32_t add_dev_interface(const gchar *adpt_path, GVariant *properties,
 							gpointer user_data)
 {
@@ -268,11 +315,12 @@ static int32_t add_dev_interface(const gchar *adpt_path, GVariant *properties,
 		g_object_unref(new_dev);
 		return -EINVAL;
 	}
-	g_variant_dict_unref(prop);
+
 	device1_set_adapter(new_dev, adpt_path);
 
 	if (nrf24_str2mac(device1_get_address(new_dev), &dev_addr) < 0) {
 		g_object_unref(new_dev);
+		g_variant_dict_unref(prop);
 		return -EINVAL;
 	}
 
@@ -292,10 +340,17 @@ static int32_t add_dev_interface(const gchar *adpt_path, GVariant *properties,
 
 	is_exported = g_dbus_object_manager_server_is_exported(manager,
 					G_DBUS_OBJECT_SKELETON(obj_skl));
-	if (!is_exported)
-		g_dbus_object_manager_server_export(manager,
+	if (is_exported){
+		g_variant_dict_unref(prop);
+		g_object_unref(obj_skl);
+		g_free(path);
+		return -EINVAL;
+	}
+
+	g_dbus_object_manager_server_export(manager,
 					G_DBUS_OBJECT_SKELETON(obj_skl));
 
+	g_variant_dict_unref(prop);
 	g_object_unref(obj_skl);
 	g_free(path);
 	/* Does not set new device as persistent */
@@ -606,7 +661,7 @@ static int8_t evt_presence(struct mgmt_nrf24_header *mhdr)
 	struct mgmt_evt_nrf24_bcast_presence *evt_pre =
 			(struct mgmt_evt_nrf24_bcast_presence *) mhdr->payload;
 	GVariantBuilder builder;
-	gchar *adpt_path;
+	gchar *adpt_path, *obj_path;
 	GVariant *properties;
 
 	nrf24_mac2str(&evt_pre->mac, mac_str);
@@ -647,12 +702,32 @@ static int8_t evt_presence(struct mgmt_nrf24_header *mhdr)
 						g_variant_new_boolean(TRUE));
 
 	adpt_path = g_strdup("/org/cesar/knot/nrf0");
+	obj_path = g_strdup_printf(
+		"%s/dev%02hhx_%02hhx_%02hhx_%02hhx_%02hhx_%02hhx_%02hhx_%02hhx",
+			adpt_path,
+			evt_pre->mac.address.b[0], evt_pre->mac.address.b[1],
+			evt_pre->mac.address.b[2], evt_pre->mac.address.b[3],
+			evt_pre->mac.address.b[4], evt_pre->mac.address.b[5],
+			evt_pre->mac.address.b[6], evt_pre->mac.address.b[7]);
 
 	properties = g_variant_builder_end(&builder);
-	add_dev_interface(adpt_path, properties, NULL);
+	if (add_dev_interface(adpt_path, properties, NULL) < 0) {
+		/* If device already has interface just updates properties */
+		g_variant_builder_init(&builder,  G_VARIANT_TYPE_ARRAY);
+		g_variant_builder_add(&builder, "{sv}", "Connected",
+						g_variant_new_boolean(FALSE));
+		g_variant_builder_add(&builder, "{sv}", "Broadcasting",
+						g_variant_new_boolean(TRUE));
+		properties = g_variant_builder_end(&builder);
+
+		update_dev_properties(
+			g_dbus_object_manager_server_get_connection(manager),
+			properties, obj_path);
+	}
 
 	g_variant_unref(properties);
 	g_free(adpt_path);
+	g_free(obj_path);
 done:
 	/* Check if peer is allowed to connect */
 	if (check_permission(evt_pre->mac) < 0)
@@ -714,6 +789,29 @@ done:
 
 		/* Remove device when the connection is established */
 		g_hash_table_remove(peer_bcast_table, mac_str);
+		/* Set device's properties */
+		adpt_path = g_strdup("/org/cesar/knot/nrf0");
+		obj_path = g_strdup_printf(
+		"%s/dev%02hhx_%02hhx_%02hhx_%02hhx_%02hhx_%02hhx_%02hhx_%02hhx",
+			adpt_path,
+			evt_pre->mac.address.b[0], evt_pre->mac.address.b[1],
+			evt_pre->mac.address.b[2], evt_pre->mac.address.b[3],
+			evt_pre->mac.address.b[4], evt_pre->mac.address.b[5],
+			evt_pre->mac.address.b[6], evt_pre->mac.address.b[7]);
+		g_variant_builder_init(&builder,  G_VARIANT_TYPE_ARRAY);
+		g_variant_builder_add(&builder, "{sv}", "Connected",
+						g_variant_new_boolean(TRUE));
+		g_variant_builder_add(&builder, "{sv}", "Broadcasting",
+						g_variant_new_boolean(FALSE));
+		properties = g_variant_builder_end(&builder);
+
+		update_dev_properties(
+			g_dbus_object_manager_server_get_connection(manager),
+			properties, obj_path);
+
+		g_free(adpt_path);
+		g_free(obj_path);
+		g_variant_unref(properties);
 	}
 
 	/*Send Connect */
